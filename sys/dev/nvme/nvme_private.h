@@ -170,7 +170,8 @@ struct nvme_tracker {
 struct nvme_qpair {
 
 	struct nvme_controller	*ctrlr;
-	uint32_t		id;
+	uint32_t                qp_sid;
+	uint32_t                qp_cid;
 	uint32_t		phase;
 
 	uint16_t		vector;
@@ -211,6 +212,10 @@ struct nvme_qpair {
 	struct mtx		lock __aligned(CACHE_LINE_SIZE);
 
 } __aligned(CACHE_LINE_SIZE);
+
+#define nvme_qpair_from_id(ctrlr, qid)  (                                      \
+	(qid) == 0 ? &(ctrlr)->adminq : &(ctrlr)->ioq[(qid) - 1]               \
+)
 
 struct nvme_namespace {
 

@@ -91,7 +91,7 @@ nvme_ctrlr_cmd_create_io_cq(struct nvme_controller *ctrlr,
 	 * TODO: create a create io completion queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(((io_que->num_entries-1) << 16) | io_que->id);
+	cmd->cdw10 = htole32(((io_que->num_entries-1) << 16) | io_que->qp_cid);
 	/* 0x3 = interrupts enabled | physically contiguous */
 	cmd->cdw11 = htole32((vector << 16) | 0x3);
 	cmd->prp1 = htole64(io_que->cpl_bus_addr);
@@ -115,9 +115,9 @@ nvme_ctrlr_cmd_create_io_sq(struct nvme_controller *ctrlr,
 	 * TODO: create a create io submission queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(((io_que->num_entries-1) << 16) | io_que->id);
+	cmd->cdw10 = htole32(((io_que->num_entries-1) << 16) | io_que->qp_sid);
 	/* 0x1 = physically contiguous */
-	cmd->cdw11 = htole32((io_que->id << 16) | 0x1);
+	cmd->cdw11 = htole32((io_que->qp_cid << 16) | 0x1);
 	cmd->prp1 = htole64(io_que->cmd_bus_addr);
 
 	nvme_ctrlr_submit_admin_request(ctrlr, req);
@@ -139,7 +139,7 @@ nvme_ctrlr_cmd_delete_io_cq(struct nvme_controller *ctrlr,
 	 * TODO: create a delete io completion queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(io_que->id);
+	cmd->cdw10 = htole32(io_que->qp_cid);
 
 	nvme_ctrlr_submit_admin_request(ctrlr, req);
 }
@@ -160,7 +160,7 @@ nvme_ctrlr_cmd_delete_io_sq(struct nvme_controller *ctrlr,
 	 * TODO: create a delete io submission queue command data
 	 *  structure.
 	 */
-	cmd->cdw10 = htole32(io_que->id);
+	cmd->cdw10 = htole32(io_que->qp_sid);
 
 	nvme_ctrlr_submit_admin_request(ctrlr, req);
 }

@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/sysctl.h>
+#include <machine/_inttypes.h>
 
 #include "nvme_private.h"
 
@@ -64,7 +65,8 @@ nvme_dump_queue(struct nvme_qpair *qpair)
 	struct nvme_command *cmd;
 	int i;
 
-	printf("id:%04Xh phase:%d\n", qpair->id, qpair->phase);
+	printf("sid:%04"PRIX32" cid: 0%04"PRIX32" phase:%"PRIu32"\n",
+	       qpair->qp_sid, qpair->qp_cid, qpair->phase);
 
 	printf("Completion queue:\n");
 	for (i = 0; i < qpair->num_entries; i++) {

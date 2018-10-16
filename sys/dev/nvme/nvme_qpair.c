@@ -131,7 +131,7 @@ nvme_admin_qpair_print_command(struct nvme_qpair *qpair,
 
 	nvme_printf(qpair->ctrlr, "%s (%02x) sqid:%d cid:%d nsid:%x "
 	    "cdw10:%08x cdw11:%08x\n",
-	    get_admin_opcode_string(cmd->opc), cmd->opc, qpair->id, cmd->cid,
+	    get_admin_opcode_string(cmd->opc), cmd->opc, qpair->qp_sid, cmd->cid,
 	    le32toh(cmd->nsid), le32toh(cmd->cdw10), le32toh(cmd->cdw11));
 }
 
@@ -148,7 +148,7 @@ nvme_io_qpair_print_command(struct nvme_qpair *qpair,
 	case NVME_OPC_WRITE_ZEROES:
 		nvme_printf(qpair->ctrlr, "%s sqid:%d cid:%d nsid:%d "
 		    "lba:%llu len:%d\n",
-		    get_io_opcode_string(cmd->opc), qpair->id, cmd->cid, le32toh(cmd->nsid),
+		    get_io_opcode_string(cmd->opc), qpair->qp_sid, cmd->cid, le32toh(cmd->nsid),
 		    ((unsigned long long)le32toh(cmd->cdw11) << 32) + le32toh(cmd->cdw10),
 		    (le32toh(cmd->cdw12) & 0xFFFF) + 1);
 		break;
@@ -159,11 +159,11 @@ nvme_io_qpair_print_command(struct nvme_qpair *qpair,
 	case NVME_OPC_RESERVATION_ACQUIRE:
 	case NVME_OPC_RESERVATION_RELEASE:
 		nvme_printf(qpair->ctrlr, "%s sqid:%d cid:%d nsid:%d\n",
-		    get_io_opcode_string(cmd->opc), qpair->id, cmd->cid, le32toh(cmd->nsid));
+		    get_io_opcode_string(cmd->opc), qpair->qp_sid, cmd->cid, le32toh(cmd->nsid));
 		break;
 	default:
 		nvme_printf(qpair->ctrlr, "%s (%02x) sqid:%d cid:%d nsid:%d\n",
-		    get_io_opcode_string(cmd->opc), cmd->opc, qpair->id,
+		    get_io_opcode_string(cmd->opc), cmd->opc, qpair->qp_sid,
 		    cmd->cid, le32toh(cmd->nsid));
 		break;
 	}
@@ -172,7 +172,7 @@ nvme_io_qpair_print_command(struct nvme_qpair *qpair,
 static void
 nvme_qpair_print_command(struct nvme_qpair *qpair, struct nvme_command *cmd)
 {
-	if (qpair->id == 0)
+	if (qpair->qp_sid == 0)
 		nvme_admin_qpair_print_command(qpair, cmd);
 	else
 		nvme_io_qpair_print_command(qpair, cmd);
@@ -444,7 +444,7 @@ nvme_qpair_manual_complete_tracker(
 
 	struct nvme_qpair * qpair = tr->qpair;
 
-	cpl.sqid = qpair->id;
+	cpl.sqid = qpair->qp_sid;
 	cpl.cid = tr->cid;
 	cpl.status |= (sct & NVME_STATUS_SCT_MASK) << NVME_STATUS_SCT_SHIFT;
 	cpl.status |= (sc & NVME_STATUS_SC_MASK) << NVME_STATUS_SC_SHIFT;
@@ -460,7 +460,7 @@ nvme_qpair_manual_complete_request(struct nvme_qpair *qpair,
 	boolean_t		error;
 
 	memset(&cpl, 0, sizeof(cpl));
-	cpl.sqid = qpair->id;
+	cpl.sqid = qpair->qp_sid;
 	cpl.status |= (sct & NVME_STATUS_SCT_MASK) << NVME_STATUS_SCT_SHIFT;
 	cpl.status |= (sc & NVME_STATUS_SC_MASK) << NVME_STATUS_SC_SHIFT;
 
@@ -482,6 +482,7 @@ nvme_qpair_process_completions(struct nvme_qpair *qpair)
 {
 	struct nvme_tracker	*tr;
 	struct nvme_completion	cpl;
+	struct nvme_controller  *ctrlr = qpair->ctrlr;
 	int done = 0;
 
 	qpair->num_intr_handler_calls++;
@@ -506,11 +507,14 @@ nvme_qpair_process_completions(struct nvme_qpair *qpair)
 		if (NVME_STATUS_GET_P(cpl.status) != qpair->phase)
 			break;
 
-		tr = qpair->act_tr[cpl.cid];
+		// determine the submission queue that submitted this tracker
+		struct nvme_qpair * sub_qpair = nvme_qpair_from_id(ctrlr, cpl.sqid);
+
+		tr = sub_qpair->act_tr[cpl.cid];
 
 		if (tr != NULL) {
 			nvme_qpair_complete_tracker(tr, &cpl, ERROR_PRINT_ALL);
-			qpair->sq_head = cpl.sqhd;
+			sub_qpair->sq_head = cpl.sqhd;
 			done++;
 		} else {
 			nvme_printf(qpair->ctrlr, 
@@ -525,7 +529,7 @@ nvme_qpair_process_completions(struct nvme_qpair *qpair)
 			qpair->phase = !qpair->phase;
 		}
 
-		nvme_mmio_write_4(qpair->ctrlr, doorbell[qpair->id].cq_hdbl,
+		nvme_mmio_write_4(qpair->ctrlr, doorbell[qpair->qp_cid].cq_hdbl,
 		    qpair->cq_head);
 	}
 	return (done != 0);
@@ -550,7 +554,8 @@ nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
 	uint8_t			*queuemem, *prpmem, *prp_list;
 	int			i, err;
 
-	qpair->id = id;
+	qpair->qp_sid = id;
+	qpair->qp_cid = id;
 	qpair->vector = vector;
 	qpair->num_entries = num_entries;
 	qpair->num_trackers = num_trackers;
@@ -808,7 +813,7 @@ nvme_timeout(void *arg)
 	}
 	if (ctrlr->enable_aborts && cfs == 0) {
 		nvme_printf(ctrlr, "Aborting command due to a timeout.\n");
-		nvme_ctrlr_cmd_abort(ctrlr, tr->cid, qpair->id,
+		nvme_ctrlr_cmd_abort(ctrlr, tr->cid, qpair->qp_sid,
 		    nvme_abort_complete, tr);
 	} else {
 		nvme_printf(ctrlr, "Resetting controller due to a timeout%s.\n",
@@ -850,7 +855,7 @@ nvme_qpair_submit_tracker(struct nvme_qpair *qpair, struct nvme_tracker *tr)
 	wmb();
 #endif
 
-	nvme_mmio_write_4(qpair->ctrlr, doorbell[qpair->id].sq_tdbl,
+	nvme_mmio_write_4(qpair->ctrlr, doorbell[qpair->qp_sid].sq_tdbl,
 	    qpair->sq_tail);
 
 	qpair->num_cmds++;
