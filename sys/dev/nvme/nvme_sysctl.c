@@ -175,7 +175,7 @@ nvme_sysctl_num_cmds(SYSCTL_HANDLER_ARGS)
 
 	num_cmds = ctrlr->adminq.num_cmds;
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++)
+	for (i = 0; i < ctrlr->nc_sq_num; i++)
 		num_cmds += ctrlr->ioq[i].num_cmds;
 
 	return (sysctl_handle_64(oidp, &num_cmds, 0, req));
@@ -190,7 +190,7 @@ nvme_sysctl_num_intr_handler_calls(SYSCTL_HANDLER_ARGS)
 
 	num_intr_handler_calls = ctrlr->adminq.num_intr_handler_calls;
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++)
+	for (i = 0; i < ctrlr->nc_cq_num; i++)
 		num_intr_handler_calls += ctrlr->ioq[i].num_intr_handler_calls;
 
 	return (sysctl_handle_64(oidp, &num_intr_handler_calls, 0, req));
@@ -210,7 +210,7 @@ nvme_sysctl_reset_stats(SYSCTL_HANDLER_ARGS)
 	if (val != 0) {
 		nvme_qpair_reset_stats(&ctrlr->adminq);
 
-		for (i = 0; i < ctrlr->nc_ioq_num; i++)
+		for (i = 0; i < ctrlr->nc_sq_num; i++)
 			nvme_qpair_reset_stats(&ctrlr->ioq[i]);
 	}
 
@@ -267,9 +267,12 @@ nvme_sysctl_initialize_ctrlr(struct nvme_controller *ctrlr)
 	ctrlr_tree = device_get_sysctl_tree(ctrlr->dev);
 	ctrlr_list = SYSCTL_CHILDREN(ctrlr_tree);
 
-	SYSCTL_ADD_UINT(ctrlr_ctx, ctrlr_list, OID_AUTO, "num_cpus_per_ioq",
-	    CTLFLAG_RD, &ctrlr->nc_ioq_num_cpus_per, 0,
-	    "Number of CPUs assigned per I/O queue pair");
+	SYSCTL_ADD_UINT(ctrlr_ctx, ctrlr_list, OID_AUTO, "num_cpus_per_sq",
+	    CTLFLAG_RD, &ctrlr->nc_sq_num_cpus_per, 0,
+	    "Number of CPUs assigned per submission queue pair");
+	SYSCTL_ADD_UINT(ctrlr_ctx, ctrlr_list, OID_AUTO, "num_cpus_per_cq",
+	    CTLFLAG_RD, &ctrlr->nc_cq_num_cpus_per, 0,
+	    "Number of CPUs assigned per completion queue pair");
 
 	SYSCTL_ADD_PROC(ctrlr_ctx, ctrlr_list, OID_AUTO,
 	    "int_coal_time", CTLTYPE_UINT | CTLFLAG_RW, ctrlr, 0,
@@ -307,7 +310,7 @@ nvme_sysctl_initialize_ctrlr(struct nvme_controller *ctrlr)
 
 	nvme_sysctl_initialize_queue(&ctrlr->adminq, ctrlr_ctx, que_tree);
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++) {
+	for (i = 0; i < ctrlr->nc_sq_num; i++) {
 		snprintf(queue_name, QUEUE_NAME_LENGTH, "ioq%d", i);
 		que_tree = SYSCTL_ADD_NODE(ctrlr_ctx, ctrlr_list, OID_AUTO,
 		    queue_name, CTLFLAG_RD, NULL, "IO Queue");

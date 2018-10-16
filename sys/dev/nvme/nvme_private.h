@@ -261,16 +261,20 @@ struct nvme_controller {
 	uint32_t		enable_aborts;
 
 	// ideal number of queues we want from the controller
-	uint32_t                nc_ioq_num_desired;
+	uint32_t                nc_sq_num_desired;
+	uint32_t                nc_cq_num_desired;
 
 	// number of queues actually allocated by the controller
-	uint32_t                nc_ioq_num_alloc;
+	uint32_t                nc_sq_num_alloc;
+	uint32_t                nc_cq_num_alloc;
 
 	// number of queues we actually set up
-	uint32_t                nc_ioq_num;
+	uint32_t                nc_sq_num;
+	uint32_t                nc_cq_num;
 
 	// and the number of CPUs that feed into any one queue
-	uint32_t                nc_ioq_num_cpus_per;
+	uint32_t                nc_sq_num_cpus_per;
+	uint32_t                nc_cq_num_cpus_per;
 
 	uint32_t		max_hw_pend_io;
 
@@ -395,7 +399,7 @@ void	nvme_ctrlr_cmd_delete_io_sq(struct nvme_controller *ctrlr,
 				    struct nvme_qpair *io_que,
 				    nvme_cb_fn_t cb_fn, void *cb_arg);
 void	nvme_ctrlr_cmd_set_num_queues(struct nvme_controller *ctrlr,
-				      uint32_t num_queues, nvme_cb_fn_t cb_fn,
+				      uint32_t num_sq, uint32_t num_cq, nvme_cb_fn_t cb_fn,
 				      void *cb_arg);
 void	nvme_ctrlr_cmd_set_async_event_config(struct nvme_controller *ctrlr,
 					      uint32_t state,
@@ -419,7 +423,7 @@ void	nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 void	nvme_ctrlr_post_failed_request(struct nvme_controller *ctrlr,
 				       struct nvme_request *req);
 
-int	nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
+int 	nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t sid, uint32_t cid,
 			     uint16_t vector, uint32_t num_entries,
 			     uint32_t num_trackers,
 			     struct nvme_controller *ctrlr);

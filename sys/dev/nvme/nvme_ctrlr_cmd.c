@@ -203,11 +203,11 @@ nvme_ctrlr_cmd_get_feature(struct nvme_controller *ctrlr, uint8_t feature,
 
 void
 nvme_ctrlr_cmd_set_num_queues(struct nvme_controller *ctrlr,
-    uint32_t num_queues, nvme_cb_fn_t cb_fn, void *cb_arg)
+    uint32_t num_sq, uint32_t num_cq, nvme_cb_fn_t cb_fn, void *cb_arg)
 {
 	uint32_t cdw11;
 
-	cdw11 = ((num_queues - 1) << 16) | (num_queues - 1);
+	cdw11 = ((num_cq - 1) << 16) | (num_sq - 1);
 	nvme_ctrlr_cmd_set_feature(ctrlr, NVME_FEAT_NUMBER_OF_QUEUES, cdw11,
 	    NULL, 0, cb_fn, cb_arg);
 }

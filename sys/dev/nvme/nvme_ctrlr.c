@@ -45,6 +45,8 @@ __FBSDID("$FreeBSD$");
 #include <dev/pci/pcireg.h>
 #include <dev/pci/pcivar.h>
 
+#include <machine/_inttypes.h>
+
 #include "nvme_private.h"
 
 #define B4_CHK_RDY_DELAY_MS	2300		/* work around controller bug */
@@ -111,8 +113,9 @@ nvme_ctrlr_construct_admin_qpair(struct nvme_controller *ctrlr)
 	 * The admin queue's max xfer size is treated differently than the
 	 *  max I/O xfer size.  16KB is sufficient here - maybe even less?
 	 */
-	error = nvme_qpair_construct(qpair, 
-				     0, /* qpair ID */
+	error = nvme_qpair_construct(qpair,
+				     0, /* submission queue ID */
+				     0, /* completion queue ID */
 				     0, /* vector */
 				     num_entries,
 				     NVME_ADMIN_TRACKERS,
@@ -158,31 +161,62 @@ nvme_ctrlr_construct_io_qpairs(struct nvme_controller *ctrlr)
 	 * not a hard limit and will need to be revisitted when the upper layers
 	 * of the storage system grows multi-queue support.
 	 */
-	ctrlr->max_hw_pend_io = num_trackers * ctrlr->nc_ioq_num * 3 / 4;
+	ctrlr->max_hw_pend_io = num_trackers * ctrlr->nc_sq_num * 3 / 4;
+
+	/*
+	 * Only 1-to-1 or many-to-1 submission-to-completion queue mappings
+	 * make any sense.
+	 */
+	KASSERT(ctrlr->nc_sq_num_alloc >= ctrlr->nc_cq_num_alloc,
+	        ("not sure what to do with more completion queues (%"PRIu32")"
+	         " than submission queues (%"PRIu32")",
+	         ctrlr->nc_cq_num_alloc, ctrlr->nc_sq_num_alloc));
+	if (ctrlr->nc_cq_num_alloc > ctrlr->nc_sq_num_alloc)
+		return (ENXIO);
 
 	/*
 	 * This was calculated previously when setting up interrupts, but
 	 *  a controller could theoretically support fewer I/O queues than
 	 *  MSI-X vectors.  So calculate again here just to be safe.
 	 */
-	ctrlr->nc_ioq_num_cpus_per = howmany(mp_ncpus, ctrlr->nc_ioq_num_alloc);
+	ctrlr->nc_sq_num_cpus_per = howmany(mp_ncpus, ctrlr->nc_sq_num_alloc);
+	ctrlr->nc_cq_num_cpus_per = howmany(mp_ncpus, ctrlr->nc_cq_num_alloc);
 
-	ctrlr->ioq = malloc(ctrlr->nc_ioq_num_alloc * sizeof *ctrlr->ioq,
+	ctrlr->ioq = malloc(ctrlr->nc_sq_num_alloc * sizeof *ctrlr->ioq,
 	    M_NVME, M_ZERO | M_WAITOK);
 
-	for (i = 0; i < ctrlr->nc_ioq_num_alloc; i++) {
+	for (i = 0; i < ctrlr->nc_sq_num_alloc; i++) {
+
+		/*
+		 *
+		 * Admin queue has ID=0. IO queues start at ID=1 - hence the
+		 * 'i+1' here.
+		 */
+		uint32_t const  sid = i + 1;
+
+		/*
+		 * Submission/completion queues can have a 1-to-1 relationship
+		 * or a many-to-1 relationship (i.e. we cannot have a
+		 * 1-to-many relationship).  If we have fewer completion
+		 * queues than submission queues (many-to-1), we will map the
+		 * submission queues in order to completion queues, wrapping
+		 * around when we run out of completion queues.
+		 *
+		 * We could add more configurability to the mapping in the
+		 * future if need be.
+		 */
+		uint32_t const  cid = i % ctrlr->nc_cq_num_alloc + 1;
+
 		qpair = &ctrlr->ioq[i];
 
 		/*
-		 * Admin queue has ID=0. IO queues start at ID=1 -
-		 *  hence the 'i+1' here.
-		 *
 		 * For I/O queues, use the controller-wide max_xfer_size
 		 *  calculated in nvme_attach().
 		 */
 		error = nvme_qpair_construct(qpair,
-				     i+1, /* qpair ID */
-				     ctrlr->msix_enabled ? i+1 : 0, /* vector */
+				     sid, /* queue ID */
+				     cid, /* queue ID */
+				     ctrlr->msix_enabled ? cid : 0, /* vector */
 				     num_entries,
 				     num_trackers,
 				     ctrlr);
@@ -193,9 +227,17 @@ nvme_ctrlr_construct_io_qpairs(struct nvme_controller *ctrlr)
 		 * Only bind interrrupts if the ctrlr is using per cpu
 		 * completion io qpairs
 		 */
-		if (ctrlr->nc_ioq_num_cpus_per == 1)
+		if (ctrlr->nc_cq_num_cpus_per == 1)
 			bus_bind_intr(ctrlr->dev, qpair->res,
-			    i * ctrlr->nc_ioq_num_cpus_per);
+			    i * ctrlr->nc_cq_num_cpus_per);
+		ctrlr->nc_sq_num += 1;
+
+		/*
+		 * Given the current SQ-to-CQ mapping strategy, if the IDs
+		 * equal, we set up a unique CQ.
+		 */
+		if (sid == cid)
+			ctrlr->nc_cq_num += 1;
 	}
 
 	return (0);
@@ -209,7 +251,7 @@ nvme_ctrlr_fail(struct nvme_controller *ctrlr)
 	ctrlr->is_failed = TRUE;
 	nvme_qpair_fail(&ctrlr->adminq);
 	if (ctrlr->ioq != NULL) {
-		for (i = 0; i < ctrlr->nc_ioq_num; i++)
+		for (i = 0; i < ctrlr->nc_sq_num; i++)
 			nvme_qpair_fail(&ctrlr->ioq[i]);
 	}
 	nvme_notify_fail_consumers(ctrlr);
@@ -386,7 +428,7 @@ nvme_ctrlr_hw_reset(struct nvme_controller *ctrlr)
 	 *  to determine if this is the initial HW reset.
 	 */
 	if (ctrlr->is_initialized) {
-		for (i = 0; i < ctrlr->nc_ioq_num; i++)
+		for (i = 0; i < ctrlr->nc_sq_num; i++)
 			nvme_io_qpair_disable(&ctrlr->ioq[i]);
 	}
 
@@ -452,7 +494,7 @@ nvme_ctrlr_set_num_qpairs(struct nvme_controller *ctrlr)
 	int					cq_allocated, sq_allocated;
 
 	status.done = 0;
-	nvme_ctrlr_cmd_set_num_queues(ctrlr, ctrlr->nc_ioq_num_desired,
+	nvme_ctrlr_cmd_set_num_queues(ctrlr, ctrlr->nc_sq_num_desired, ctrlr->nc_cq_num_desired,
 	    nvme_completion_poll_cb, &status);
 	while (!atomic_load_acq_int(&status.done))
 		pause("nvme", 1);
@@ -474,8 +516,8 @@ nvme_ctrlr_set_num_qpairs(struct nvme_controller *ctrlr)
 	 *  so use the minimum of the number requested and what was
 	 *  actually allocated.
 	 */
-	ctrlr->nc_ioq_num_alloc = min(ctrlr->nc_ioq_num_desired, sq_allocated);
-	ctrlr->nc_ioq_num_alloc = min(ctrlr->nc_ioq_num_alloc, cq_allocated);
+	ctrlr->nc_sq_num_alloc = min(ctrlr->nc_sq_num_desired, sq_allocated);
+	ctrlr->nc_cq_num_alloc = min(ctrlr->nc_cq_num_desired, cq_allocated);
 
 	return (0);
 }
@@ -487,7 +529,7 @@ nvme_ctrlr_create_qpairs(struct nvme_controller *ctrlr)
 	struct nvme_qpair			*qpair;
 	int					i;
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++) {
+	for (i = 0; i < ctrlr->nc_cq_num; i++) {
 		qpair = &ctrlr->ioq[i];
 
 		status.done = 0;
@@ -500,6 +542,10 @@ nvme_ctrlr_create_qpairs(struct nvme_controller *ctrlr)
 			return (ENXIO);
 		}
 
+	}
+
+	for (i = 0; i < ctrlr->nc_sq_num; i++) {
+		qpair = &ctrlr->ioq[i];
 		status.done = 0;
 		nvme_ctrlr_cmd_create_io_sq(qpair->ctrlr, qpair,
 		    nvme_completion_poll_cb, &status);
@@ -520,8 +566,9 @@ nvme_ctrlr_destroy_qpairs(struct nvme_controller *ctrlr)
 	struct nvme_completion_poll_status	status;
 	struct nvme_qpair			*qpair;
 
-	for (int i = 0; i < ctrlr->nc_ioq_num; i++) {
+	for (int i = 0; i < ctrlr->nc_sq_num; i++) {
 		qpair = &ctrlr->ioq[i];
+
 		status.done = 0;
 		nvme_ctrlr_cmd_delete_io_sq(ctrlr, qpair,
 		    nvme_completion_poll_cb, &status);
@@ -531,6 +578,10 @@ nvme_ctrlr_destroy_qpairs(struct nvme_controller *ctrlr)
 			nvme_printf(ctrlr, "nvme_destroy_io_sq failed!\n");
 			return (ENXIO);
 		}
+	}
+
+	for (int i = 0; i < ctrlr->nc_cq_num; i++) {
+		qpair = &ctrlr->ioq[i];
 
 		status.done = 0;
 		nvme_ctrlr_cmd_delete_io_cq(ctrlr, qpair,
@@ -835,7 +886,8 @@ static void
 nvme_ctrlr_start(void *ctrlr_arg)
 {
 	struct nvme_controller *ctrlr = ctrlr_arg;
-	uint32_t old_num_io_queues;
+	uint32_t old_num_s_queues;
+	uint32_t old_num_c_queues;
 	int i;
 
 	/*
@@ -849,7 +901,7 @@ nvme_ctrlr_start(void *ctrlr_arg)
 		nvme_qpair_reset(&ctrlr->adminq);
 	}
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++)
+	for (i = 0; i < ctrlr->nc_sq_num; i++)
 		nvme_qpair_reset(&ctrlr->ioq[i]);
 
 	nvme_admin_qpair_enable(&ctrlr->adminq);
@@ -868,15 +920,20 @@ nvme_ctrlr_start(void *ctrlr_arg)
 	 *  never change between resets, so panic if somehow that does happen.
 	 */
 	if (ctrlr->is_resetting) {
-		old_num_io_queues = ctrlr->nc_ioq_num;
+		old_num_s_queues = ctrlr->nc_sq_num;
+		old_num_c_queues = ctrlr->nc_cq_num;
 		if (nvme_ctrlr_set_num_qpairs(ctrlr) != 0) {
 			nvme_ctrlr_fail(ctrlr);
 			return;
 		}
 
-		if (old_num_io_queues != ctrlr->nc_ioq_num) {
-			panic("num_io_queues changed from %u to %u",
-			      old_num_io_queues, ctrlr->nc_ioq_num);
+		if (old_num_s_queues != ctrlr->nc_sq_num) {
+			panic("num_sq changed from %"PRIu32" to %"PRIu32,
+			      old_num_c_queues, ctrlr->nc_sq_num);
+		}
+		if (old_num_c_queues != ctrlr->nc_cq_num) {
+			panic("num_cq changed from %"PRIu32" to %"PRIu32,
+			      old_num_c_queues, ctrlr->nc_cq_num);
 		}
 	}
 
@@ -893,7 +950,7 @@ nvme_ctrlr_start(void *ctrlr_arg)
 	nvme_ctrlr_configure_aer(ctrlr);
 	nvme_ctrlr_configure_int_coalescing(ctrlr);
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++)
+	for (i = 0; i < ctrlr->nc_sq_num; i++)
 		nvme_io_qpair_enable(&ctrlr->ioq[i]);
 }
 
@@ -953,7 +1010,7 @@ nvme_ctrlr_poll(struct nvme_controller *ctrlr)
 
 	nvme_qpair_process_completions(&ctrlr->adminq);
 
-	for (i = 0; i < ctrlr->nc_ioq_num; i++)
+	for (i = 0; i < ctrlr->nc_cq_num; i++)
 		if (ctrlr->ioq && ctrlr->ioq[i].cpl)
 			nvme_qpair_process_completions(&ctrlr->ioq[i]);
 }
@@ -978,8 +1035,10 @@ nvme_ctrlr_configure_intx(struct nvme_controller *ctrlr)
 {
 
 	ctrlr->msix_enabled = 0;
-	ctrlr->nc_ioq_num = 1;
-	ctrlr->nc_ioq_num_cpus_per = mp_ncpus;
+	ctrlr->nc_sq_num = 1;
+	ctrlr->nc_cq_num = 1;
+	ctrlr->nc_sq_num_cpus_per = mp_ncpus;
+	ctrlr->nc_cq_num_cpus_per = mp_ncpus;
 	ctrlr->rid = 0;
 	ctrlr->res = bus_alloc_resource_any(ctrlr->dev, SYS_RES_IRQ,
 	    &ctrlr->rid, RF_SHAREABLE | RF_ACTIVE);
@@ -1193,12 +1252,15 @@ nvme_ctrlr_setup_interrupts(struct nvme_controller *ctrlr)
 	 * Do not use all vectors for I/O queues - one must be saved for the
 	 *  admin queue.
 	 */
-	ctrlr->nc_ioq_num_cpus_per = max(min_cpus_per_ioq,
+	ctrlr->nc_sq_num_cpus_per = max(min_cpus_per_ioq,
+	    howmany(mp_ncpus, num_vectors_available - 1));
+	ctrlr->nc_cq_num_cpus_per = max(min_cpus_per_ioq,
 	    howmany(mp_ncpus, num_vectors_available - 1));
 
-	ctrlr->nc_ioq_num_desired = howmany(mp_ncpus, ctrlr->nc_ioq_num_cpus_per);
+	ctrlr->nc_sq_num_desired = howmany(mp_ncpus, ctrlr->nc_sq_num_cpus_per);
+	ctrlr->nc_cq_num_desired = howmany(mp_ncpus, ctrlr->nc_cq_num_cpus_per);
 
-	num_vectors_requested = ctrlr->nc_ioq_num_desired + 1;
+	num_vectors_requested = ctrlr->nc_cq_num_desired + 1;
 	num_vectors_allocated = num_vectors_requested;
 
 	/*
@@ -1320,7 +1382,7 @@ nvme_ctrlr_destruct(struct nvme_controller *ctrlr, device_t dev)
 		destroy_dev(ctrlr->cdev);
 
 	nvme_ctrlr_destroy_qpairs(ctrlr);
-	for (i = 0; i < ctrlr->nc_ioq_num; i++) {
+	for (i = 0; i < ctrlr->nc_sq_num; i++) {
 		nvme_io_qpair_destroy(&ctrlr->ioq[i]);
 	}
 	free(ctrlr->ioq, M_NVME);
@@ -1399,7 +1461,7 @@ nvme_ctrlr_submit_io_request(struct nvme_controller *ctrlr,
 {
 	struct nvme_qpair       *qpair;
 
-	qpair = &ctrlr->ioq[curcpu / ctrlr->nc_ioq_num_cpus_per];
+	qpair = &ctrlr->ioq[curcpu / ctrlr->nc_sq_num_cpus_per];
 	nvme_qpair_submit_request(qpair, req);
 }
 

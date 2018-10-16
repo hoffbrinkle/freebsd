@@ -544,7 +544,7 @@ nvme_qpair_msix_handler(void *arg)
 }
 
 int
-nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
+nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t sid, uint32_t cid,
     uint16_t vector, uint32_t num_entries, uint32_t num_trackers,
     struct nvme_controller *ctrlr)
 {
@@ -554,32 +554,41 @@ nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
 	uint8_t			*queuemem, *prpmem, *prp_list;
 	int			i, err;
 
-	qpair->qp_sid = id;
-	qpair->qp_cid = id;
-	qpair->vector = vector;
+	qpair->qp_sid = sid;
+	qpair->qp_cid = cid;
 	qpair->num_entries = num_entries;
 	qpair->num_trackers = num_trackers;
 	qpair->ctrlr = ctrlr;
 
-	if (ctrlr->msix_enabled) {
+	/*
+	 * Check to see if we've set up this completion queue yet.
+	 *
+	 * The assumption is that we have an ordered distribution of
+	 * completion to submission queues.  That is, we would not have the
+	 * case where we allocate 2 qpairs and qpair0 completes to qpair1 and
+	 * qpair1 completes to qpair0.
+	 */
+	struct nvme_qpair *  cq = nvme_qpair_from_id(ctrlr, cid);
+	if (ctrlr->msix_enabled && !cq->tag) {
 
 		/*
 		 * MSI-X vector resource IDs start at 1, so we add one to
 		 *  the queue's vector to get the corresponding rid to use.
 		 */
-		qpair->rid = vector + 1;
+		cq->vector = vector;
+		cq->rid = vector + 1;
 
-		qpair->res = bus_alloc_resource_any(ctrlr->dev, SYS_RES_IRQ,
-		    &qpair->rid, RF_ACTIVE);
-		bus_setup_intr(ctrlr->dev, qpair->res,
+		cq->res = bus_alloc_resource_any(ctrlr->dev, SYS_RES_IRQ,
+		    &cq->rid, RF_ACTIVE);
+		bus_setup_intr(ctrlr->dev, cq->res,
 		    INTR_TYPE_MISC | INTR_MPSAFE, NULL,
-		    nvme_qpair_msix_handler, qpair, &qpair->tag);
-		if (id == 0) {
-			bus_describe_intr(ctrlr->dev, qpair->res, qpair->tag,
+		    nvme_qpair_msix_handler, cq, &cq->tag);
+		if (cid == 0) {
+			bus_describe_intr(ctrlr->dev, cq->res, cq->tag,
 			    "admin");
 		} else {
-			bus_describe_intr(ctrlr->dev, qpair->res, qpair->tag,
-			    "io%d", id - 1);
+			bus_describe_intr(ctrlr->dev, cq->res, cq->tag,
+			    "io%d", cid - 1);
 		}
 	}
 
@@ -602,8 +611,11 @@ nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
 	 */
 	cmdsz = qpair->num_entries * sizeof(struct nvme_command);
 	cmdsz = roundup2(cmdsz, PAGE_SIZE);
-	cplsz = qpair->num_entries * sizeof(struct nvme_completion);
-	cplsz = roundup2(cplsz, PAGE_SIZE);
+	cplsz = 0;
+	if (!cq->cpl) {
+		cplsz = qpair->num_entries * sizeof(struct nvme_completion);
+		cplsz = roundup2(cplsz, PAGE_SIZE);
+	}
 	prpsz = sizeof(uint64_t) * NVME_MAX_PRP_LIST_ENTRIES;;
 	prpmemsz = qpair->num_trackers * prpsz;
 	allocsz = cmdsz + cplsz + prpmemsz;
@@ -631,14 +643,17 @@ nvme_qpair_construct(struct nvme_qpair *qpair, uint32_t id,
 	qpair->num_cmds = 0;
 	qpair->num_intr_handler_calls = 0;
 	qpair->cmd = (struct nvme_command *)queuemem;
-	qpair->cpl = (struct nvme_completion *)(queuemem + cmdsz);
-	prpmem = (uint8_t *)(queuemem + cmdsz + cplsz);
 	qpair->cmd_bus_addr = queuemem_phys;
-	qpair->cpl_bus_addr = queuemem_phys + cmdsz;
+	if (!cq->cpl) {
+		cq->cpl = (struct nvme_completion *)(queuemem + cmdsz);
+		cq->cpl_bus_addr = queuemem_phys + cmdsz;
+	}
+	prpmem = (uint8_t *)(queuemem + cmdsz + cplsz);
 	prpmem_phys = queuemem_phys + cmdsz + cplsz;
 
-	qpair->sq_tdbl_off = nvme_mmio_offsetof(doorbell[id].sq_tdbl);
-	qpair->cq_hdbl_off = nvme_mmio_offsetof(doorbell[id].cq_hdbl);
+	qpair->sq_tdbl_off = nvme_mmio_offsetof(doorbell[sid].sq_tdbl);
+	if (!cq->cq_hdbl_off)
+		cq->cq_hdbl_off = nvme_mmio_offsetof(doorbell[cid].cq_hdbl);
 
 	TAILQ_INIT(&qpair->free_tr);
 	TAILQ_INIT(&qpair->outstanding_tr);
@@ -1039,8 +1054,9 @@ nvme_qpair_reset(struct nvme_qpair *qpair)
 
 	memset(qpair->cmd, 0,
 	    qpair->num_entries * sizeof(struct nvme_command));
-	memset(qpair->cpl, 0,
-	    qpair->num_entries * sizeof(struct nvme_completion));
+	if (qpair->cpl)
+		memset(qpair->cpl, 0,
+		    qpair->num_entries * sizeof(struct nvme_completion));
 }
 
 void

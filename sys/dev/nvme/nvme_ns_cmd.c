@@ -185,10 +185,11 @@ nvme_ns_dump(struct nvme_namespace *ns, void *virt, off_t offset, size_t len)
 	if (req->qpair == NULL)
 		return (ENXIO);
 
+	struct nvme_qpair * cq = nvme_qpair_from_id(ns->ctrlr, req->qpair->qp_cid);
 	i = 0;
 	while ((i++ < NVD_DUMP_TIMEOUT) && (status.done == FALSE)) {
 		DELAY(5);
-		nvme_qpair_process_completions(req->qpair);
+		nvme_qpair_process_completions(cq);
 	}
 
 	if (status.done == FALSE)
