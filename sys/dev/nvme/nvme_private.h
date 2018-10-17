@@ -255,8 +255,18 @@ struct nvme_controller {
 	uint32_t		force_intx;
 	uint32_t		enable_aborts;
 
-	uint32_t		num_io_queues;
-	uint32_t		num_cpus_per_ioq;
+	// ideal number of queues we want from the controller
+	uint32_t                nc_ioq_num_desired;
+
+	// number of queues actually allocated by the controller
+	uint32_t                nc_ioq_num_alloc;
+
+	// number of queues we actually set up
+	uint32_t                nc_ioq_num;
+
+	// and the number of CPUs that feed into any one queue
+	uint32_t                nc_ioq_num_cpus_per;
+
 	uint32_t		max_hw_pend_io;
 
 	/* Fields for tracking progress during controller initialization. */
